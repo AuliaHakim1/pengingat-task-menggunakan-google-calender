@@ -19,11 +19,17 @@ export default async function handler(req, res) {
 
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
-    // === 2. SET TIMEFRAME HARI INI ===
-    // Mengambil batas awal dan akhir hari ini (WIB / waktu lokal server)
-    const sekarang = new Date();
-    const awalHari = new Date(sekarang.getFullYear(), sekarang.getMonth(), sekarang.getDate(), 0, 0, 0);
-    const akhirHari = new Date(sekarang.getFullYear(), sekarang.getMonth(), sekarang.getDate(), 23, 59, 59);
+    // === 2. SET TIMEFRAME HARI INI (FIX ZONA WAKTU WIB) ===
+    // Karena Vercel pakai UTC, kita paksa bikin batasan hari ini pakai zona waktu Jakarta (WIB)
+    const tglWIB = new Intl.DateTimeFormat('en-CA', { 
+      timeZone: 'Asia/Jakarta', 
+      year: 'numeric', 
+      month: '2-digit', 
+      day: '2-digit' 
+    }).format(new Date());
+
+    const awalHari = new Date(`${tglWIB}T00:00:00+07:00`);
+    const akhirHari = new Date(`${tglWIB}T23:59:59+07:00`);
 
     // === 3. FETCH AGENDA DARI BEBERAPA GOOGLE CALENDAR ===
     // Masukin ID kalender yang mau dicek (kalender utama dan kalender SIB)
@@ -54,22 +60,40 @@ export default async function handler(req, res) {
       return new Date(timeA) - new Date(timeB);
     });
 
+    // === FORMAT AGENDA MIRIP N8N ===
     let agenda = "Gak ada agenda hari ini, santai cuy!";
 
     if (allEvents.length > 0) {
       agenda = allEvents
-        .map((event, index) => {
-          // Cek apakah event seharian penuh atau ada jamnya
-          const waktuMulai = event.start.dateTime
-            ? new Date(event.start.dateTime).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
-            : 'Seharian';
+        .map((event) => {
+          // 1. Ambil Waktu persis format n8n (ISO Date)
+          let waktuMulai = event.start.date || 'Seharian Penuh'; // fallback kalau event seharian
+          if (event.start.dateTime) {
+            waktuMulai = event.start.dateTime; 
+          }
+
+          // 2. Ambil Judul dan Lokasi
+          const judul = event.summary || 'Tanpa Judul';
+          const lokasiEvent = event.location ? `\nLokasi: ${event.location}` : '';
           
-          return `${index + 1}. [${waktuMulai}] ${event.summary}`;
+          // 3. Ambil dan Bersihkan Deskripsi
+          let deskripsi = '';
+          if (event.description) {
+            let descBersih = event.description
+              .replace(/<br\s*[\/]?>/gi, '\n') // Ubah <br> jadi baris baru
+              .replace(/<[^>]+>/g, '');        // Hapus sisa tag HTML kayak <a>, <b>, dll
+            
+            deskripsi = `\n\nDeskripsi:\n${descBersih}`;
+          }
+
+          // 4. Susun format template pesannya
+          return `Acara: ${judul}\nWaktu: ${waktuMulai}${lokasiEvent}${deskripsi}`;
         })
-        .join('\n');
+        .join('\n\n------------------------\n\n'); // Garis pemisah kalau eventnya banyak
     }
 
     // === 4. FETCH CUACA (WeatherAPI) ===
+    // Parameter location gw set Bekasi sesuai prompt awal lu, tapi lu bisa ganti jadi 'Jakarta' kalau mau plek ketiplek
     const weatherURL = `http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=Bekasi`;
     const weatherRes = await fetch(weatherURL);
     const weatherData = await weatherRes.json();
@@ -78,7 +102,7 @@ export default async function handler(req, res) {
     const lokasi = weatherData.location.name;
 
     // === 5. FORMAT & KIRIM TELEGRAM ===
-    const textTelegram = `Halo! Ini update hari ini:\n\n📍 Lokasi: ${lokasi}\n🌤️ Cuaca: ${cuaca} (${suhu}°C)\n\n📅 Agenda Hari Ini:\n${agenda}`;
+    const textTelegram = `👋 Laporan Harian\n\n📍 Lokasi: ${lokasi}\n🌤 Kondisi: ${cuaca}\n🌡 Suhu: ${suhu}°C\n\n📅 Agenda Berikutnya:\n${agenda}`;
 
     await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
