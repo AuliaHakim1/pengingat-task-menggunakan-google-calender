@@ -36,7 +36,8 @@ export default async function handler(req, res) {
     return res.status(200).send('OK');
   }
 
-  const teksMasuk = message.text.toLowerCase();
+  const rawText = message.text || '';
+  const teksMasuk = rawText.toLowerCase();
 
   // Minta Lokasi Cuaca
   if (teksMasuk.includes('cuaca')) {
@@ -49,13 +50,14 @@ export default async function handler(req, res) {
   }
 
   // === FITUR 3: TAMBAH JADWAL ===
-  const tambahMatch = teksMasuk.match(/^tambah acara\s*:\s*(.*)/i);
+  const tambahMatch = rawText.match(/^tambah acara\s*:\s*([^\n]+)(?:\n([\s\S]*))?/i);
   if (tambahMatch) {
-    const content = tambahMatch[1];
-    const dateMatch = content.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
+    const firstLine = tambahMatch[1];
+    const deskripsi = tambahMatch[2] ? tambahMatch[2].trim() : '';
+    const dateMatch = firstLine.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
     
     if (!dateMatch) {
-      await sendTelegramMsg(chatId, '❌ Format salah. Harap cantumkan tanggal dengan format DD-MM-YYYY.\nContoh: tambah acara : Rapat Klien 19-05-2026');
+      await sendTelegramMsg(chatId, '❌ Format salah. Harap cantumkan tanggal dengan format DD-MM-YYYY.\nContoh:\ntambah acara : Rapat Klien 19-05-2026\nIni deskripsinya...');
       return res.status(200).send('OK');
     }
 
@@ -64,12 +66,11 @@ export default async function handler(req, res) {
     const year = dateMatch[3];
     const dateStr = `${year}-${month}-${day}`;
     
-    // Google Calendar API mengharuskan end.date untuk acara seharian adalah +1 hari
     const startDateObj = new Date(`${dateStr}T00:00:00`);
     startDateObj.setDate(startDateObj.getDate() + 1);
     const nextDayStr = startDateObj.toISOString().split('T')[0];
     
-    let title = content.replace(dateMatch[0], '').replace(/\||-|:/g, ' ').replace(/\s+/g, ' ').trim();
+    let title = firstLine.replace(dateMatch[0], '').replace(/\||-|:/g, ' ').replace(/\s+/g, ' ').trim();
     if (!title) title = 'Acara Baru';
 
     try {
@@ -77,18 +78,79 @@ export default async function handler(req, res) {
       oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
       const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
       
+      const reqBody = {
+        summary: title,
+        start: { date: dateStr },
+        end: { date: nextDayStr }
+      };
+      if (deskripsi) reqBody.description = deskripsi;
+
       await calendar.events.insert({
         calendarId: 'primary',
-        requestBody: {
-          summary: title,
-          start: { date: dateStr },
-          end: { date: nextDayStr }
-        }
+        requestBody: reqBody
       });
-      await sendTelegramMsg(chatId, `✅ Berhasil menambahkan jadwal!\n\nAcara: ${title}\nTanggal: ${day}-${month}-${year}`);
+      await sendTelegramMsg(chatId, `✅ Berhasil menambahkan jadwal!\n\nAcara: ${title}\nTanggal: ${day}-${month}-${year}\nDeskripsi: ${deskripsi ? 'Ada' : 'Tidak ada'}`);
     } catch (err) {
       console.error(err);
       await sendTelegramMsg(chatId, `❌ Gagal menambahkan jadwal ke Google Calendar.\nError: ${err.message}`);
+    }
+    return res.status(200).send('OK');
+  }
+
+  // === FITUR 5: EDIT DESKRIPSI ACARA ===
+  const editMatch = rawText.match(/^edit deskripsi\s*:\s*([^\n]+)\n([\s\S]*)/i);
+  if (editMatch) {
+    const firstLine = editMatch[1];
+    const deskripsiBaru = editMatch[2].trim();
+    const dateMatch = firstLine.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
+
+    if (!dateMatch) {
+      await sendTelegramMsg(chatId, '❌ Format salah. Harap cantumkan tanggal dengan format DD-MM-YYYY.\nContoh:\nedit deskripsi : Rapat Klien 19-05-2026\nIni deskripsi barunya...');
+      return res.status(200).send('OK');
+    }
+
+    const day = dateMatch[1].padStart(2, '0');
+    const month = dateMatch[2].padStart(2, '0');
+    const year = dateMatch[3];
+    const dateStr = `${year}-${month}-${day}`;
+    let titleToFind = firstLine.replace(dateMatch[0], '').replace(/\||-|:/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+
+    try {
+      const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
+      oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+      // Ambil semua acara pada tanggal tersebut
+      const awalHari = new Date(`${dateStr}T00:00:00+07:00`).toISOString();
+      const akhirHari = new Date(`${dateStr}T23:59:59+07:00`).toISOString();
+      
+      const calendarRes = await calendar.events.list({
+        calendarId: 'primary',
+        timeMin: awalHari,
+        timeMax: akhirHari,
+        singleEvents: true
+      });
+
+      const events = calendarRes.data.items || [];
+      const targetEvent = events.find(ev => ev.summary && ev.summary.toLowerCase().includes(titleToFind));
+
+      if (!targetEvent) {
+        await sendTelegramMsg(chatId, `❌ Acara dengan kata kunci "${titleToFind}" pada tanggal ${dateStr} tidak ditemukan.`);
+        return res.status(200).send('OK');
+      }
+
+      await calendar.events.patch({
+        calendarId: 'primary',
+        eventId: targetEvent.id,
+        requestBody: {
+          description: deskripsiBaru
+        }
+      });
+
+      await sendTelegramMsg(chatId, `✅ Berhasil memperbarui deskripsi!\n\nAcara: ${targetEvent.summary}\nTanggal: ${day}-${month}-${year}`);
+    } catch (err) {
+      console.error(err);
+      await sendTelegramMsg(chatId, `❌ Gagal memperbarui deskripsi.\nError: ${err.message}`);
     }
     return res.status(200).send('OK');
   }
