@@ -317,10 +317,44 @@ export default async function handler(req, res) {
 
   // --- EDIT DESKRIPSI ---
   if (parsed.intent === 'edit_deskripsi') {
-    const { judul, tanggal, deskripsi } = parsed;
+    // Jika AI tidak berhasil mengekstrak data, parse manual dari rawText
+    let { judul, tanggal, deskripsi } = parsed;
+
+    if (!judul || !deskripsi) {
+      const lines = rawText.split('\n');
+      const firstLine = lines[0];
+      const restLines = lines.slice(1).join('\n').trim();
+
+      // Ekstrak deskripsi dari baris ke-2 dst
+      if (!deskripsi && restLines) deskripsi = restLines;
+
+      // Ekstrak judul dari baris pertama (hapus kata perintah di depan)
+      if (!judul) {
+        judul = firstLine
+          .replace(/edit deskripsi\s*/i, '')
+          .replace(/untuk acara\s*/i, '')
+          .replace(/untuk\s*/i, '')
+          .replace(/acara\s*/i, '')
+          .replace(/(\d{1,2})-(\d{1,2})-(\d{4})/, '') // hapus tanggal jika ada
+          .trim();
+      }
+
+      // Ekstrak tanggal dari baris pertama jika belum ada
+      if (!tanggal) {
+        const dateMatch = firstLine.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
+        if (dateMatch) {
+          const d = dateMatch[1].padStart(2, '0');
+          const m = dateMatch[2].padStart(2, '0');
+          const y = dateMatch[3];
+          tanggal = `${y}-${m}-${d}`;
+        }
+      }
+    }
 
     if (!deskripsi) {
-      await sendTelegramMsg(chatId, '⚠️ Bisa sebutkan deskripsi barunya?\n\nContoh:\n"edit deskripsi meeting klien\ndeskripsi barunya di sini..."');
+      await sendTelegramMsg(chatId,
+        '⚠️ Saya tidak menemukan deskripsi barunya.\n\nFormat:\n"edit deskripsi [nama acara]\n[deskripsi barunya di sini...]"'
+      );
       return res.status(200).send('OK');
     }
 
@@ -329,11 +363,9 @@ export default async function handler(req, res) {
       let target = null;
 
       if (tanggal) {
-        // Jika tanggal disebutkan, cari di tanggal itu saja
         const events = await fetchEvents(calendar, tanggal);
         target = events.find(ev => ev.summary?.toLowerCase().includes((judul || '').toLowerCase()));
       } else if (judul) {
-        // Tanggal tidak disebutkan, cari di hari ini + 7 hari ke depan
         for (let i = 0; i <= 7; i++) {
           const d = new Date();
           d.setDate(d.getDate() + i);
@@ -366,6 +398,7 @@ export default async function handler(req, res) {
     }
     return res.status(200).send('OK');
   }
+
 
 
   // --- HAPUS ACARA ---
