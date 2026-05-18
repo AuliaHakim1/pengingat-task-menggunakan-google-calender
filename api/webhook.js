@@ -71,7 +71,7 @@ Format response JSON:
         'X-Title': 'Bot Telegram Kalender'
       },
       body: JSON.stringify({
-        model: 'meta-llama/llama-3.1-8b-instruct:free',
+        model: 'openai/gpt-oss-120b:free',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: text }
