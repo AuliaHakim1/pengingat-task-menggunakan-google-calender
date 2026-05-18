@@ -71,7 +71,7 @@ Format response JSON:
         'X-Title': 'Bot Telegram Kalender'
       },
       body: JSON.stringify({
-        model: 'google/gemma-3-27b-it:free',
+        model: 'meta-llama/llama-3.1-8b-instruct:free',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: text }
@@ -82,16 +82,37 @@ Format response JSON:
     });
 
     const data = await res.json();
+
+    // Log error dari OpenRouter jika ada
+    if (data.error) {
+      console.error('OpenRouter API error:', JSON.stringify(data.error));
+      return { intent: 'ai_error', errorMsg: data.error.message || 'Unknown error' };
+    }
+
     const rawContent = data.choices?.[0]?.message?.content?.trim();
-    if (!rawContent) return { intent: 'fallback' };
+    if (!rawContent) {
+      console.error('OpenRouter empty response:', JSON.stringify(data));
+      return { intent: 'fallback' };
+    }
 
     // Bersihkan kalau ada markdown code block dari AI
     const cleaned = rawContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     return JSON.parse(cleaned);
   } catch (err) {
-    console.error('OpenRouter error:', err.message);
-    return { intent: 'fallback' };
+    console.error('OpenRouter fetch error:', err.message);
+    return { intent: 'ai_error', errorMsg: err.message };
   }
+}
+
+// =============================================
+// HELPER: Keyword fallback jika AI gagal
+// =============================================
+function parseWithKeyword(text, today) {
+  const t = text.toLowerCase();
+  if (t.includes('besok')) return { intent: 'cek_agenda_besok' };
+  if (t.includes('hari ini') || t.includes('agenda') || t.includes('jadwal') || t.includes('halo') || t.includes('kegiatan')) return { intent: 'cek_agenda_hari_ini' };
+  if (t.includes('cuaca')) return { intent: 'cek_cuaca' };
+  return { intent: 'fallback' };
 }
 
 // =============================================
@@ -182,10 +203,26 @@ export default async function handler(req, res) {
   try {
     parsed = await parseWithAI(rawText, today);
   } catch (err) {
-    parsed = { intent: 'fallback' };
+    parsed = { intent: 'ai_error', errorMsg: err.message };
   }
 
   console.log('AI parsed:', JSON.stringify(parsed));
+
+  // Jika AI gagal atau error, gunakan keyword fallback
+  if (parsed.intent === 'ai_error') {
+    console.log('AI failed, error:', parsed.errorMsg, '- switching to keyword fallback');
+    // Kirim pesan debug sementara agar bisa diagnosa
+    await sendTelegramMsg(chatId, `⚙️ [DEBUG] AI gagal: ${parsed.errorMsg}\nMenggunakan keyword fallback...`);
+    parsed = parseWithKeyword(rawText, today);
+  } else if (parsed.intent === 'fallback') {
+    // Coba keyword dulu sebelum benar-benar fallback
+    const kwParsed = parseWithKeyword(rawText, today);
+    if (kwParsed.intent !== 'fallback') {
+      parsed = kwParsed;
+    }
+  }
+
+  console.log('Final intent:', parsed.intent);
 
   // =============================================
   // ROUTING BERDASARKAN INTENT
