@@ -9,14 +9,69 @@ export default async function handler(req, res) {
   // Ambil data pesan dari Telegram
   const message = req.body.message;
   
-  // Kalau yang masuk bukan pesan teks, abaikan aja dan kasih status 200 biar Telegram tenang
-  if (!message || !message.text) {
+  // Kalau yang masuk bukan pesan teks atau lokasi, abaikan aja
+  if (!message || (!message.text && !message.location)) {
     return res.status(200).send('OK');
   }
 
   const chatId = message.chat.id;
+
+  // === ALUR 1: Jika User Mengirim Lokasi ===
+  if (message.location) {
+    try {
+      const lat = message.location.latitude;
+      const lon = message.location.longitude;
+      
+      const weatherRes = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=${lat},${lon}`);
+      const weatherData = await weatherRes.json();
+      const cuaca = weatherData.current.condition.text;
+      const suhu = weatherData.current.temp_c;
+      const lokasi = weatherData.location.name;
+
+      const textTelegram = `📍 Laporan Cuaca\n\nLokasi: ${lokasi}\n🌤 Kondisi: ${cuaca}\n🌡 Suhu: ${suhu}°C`;
+
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: textTelegram }),
+      });
+    } catch (error) {
+      console.error("Gagal ambil cuaca:", error);
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: 'Waduh, gagal ngambil data cuaca nih.' }),
+      });
+    }
+    return res.status(200).send('OK');
+  }
+
+  // === PASTIKAN ADA TEKS SEBELUM LANJUT ===
+  if (!message.text) return res.status(200).send('OK');
+  
   const teksMasuk = message.text.toLowerCase();
 
+  // === ALUR 2: Jika User Minta Cuaca ===
+  if (teksMasuk.includes('cuaca')) {
+    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        chat_id: chatId, 
+        text: 'Silakan kirim lokasi Anda untuk mendapatkan informasi cuaca terkini di daerah Anda.',
+        reply_markup: {
+          keyboard: [
+            [{ text: '📍 Kirim Lokasi Saat Ini', request_location: true }]
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: true
+        }
+      }),
+    });
+    return res.status(200).send('OK');
+  }
+
+  // === ALUR 3: Laporan Penuh (Jadwal + Cuaca Statis) ===
   // Cek apakah pesan mengandung kata kunci nanyain jadwal
   if (teksMasuk.includes('halo') || teksMasuk.includes('kegiatan') || teksMasuk.includes('hari ini') || teksMasuk.includes('agenda')) {
     
@@ -102,7 +157,7 @@ export default async function handler(req, res) {
     await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: 'Gw cuma bot pengingat jadwal. Coba ketik "halo" atau "ada kegiatan apa hari ini?"' }),
+      body: JSON.stringify({ chat_id: chatId, text: 'Gw cuma bot pengingat jadwal. Coba ketik "halo", "agenda", atau "cuaca".' }),
     });
   }
 
