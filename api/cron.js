@@ -25,20 +25,39 @@ export default async function handler(req, res) {
     const awalHari = new Date(sekarang.getFullYear(), sekarang.getMonth(), sekarang.getDate(), 0, 0, 0);
     const akhirHari = new Date(sekarang.getFullYear(), sekarang.getMonth(), sekarang.getDate(), 23, 59, 59);
 
-    // === 3. FETCH AGENDA DARI GOOGLE CALENDAR ===
-    const calendarRes = await calendar.events.list({
-      calendarId: 'primary', // 'primary' otomatis ngarah ke kalender utama akun lu
-      timeMin: awalHari.toISOString(),
-      timeMax: akhirHari.toISOString(),
-      singleEvents: true, // Biar event yang berulang (recurring) dihitung satuan
-      orderBy: 'startTime',
+    // === 3. FETCH AGENDA DARI BEBERAPA GOOGLE CALENDAR ===
+    // Masukin ID kalender yang mau dicek (kalender utama dan kalender SIB)
+    const calendarIds = ['primary', process.env.CALENDAR_SIB_ID];
+    let allEvents = [];
+
+    // Looping buat narik jadwal dari semua kalender yang ada di array
+    for (const calId of calendarIds) {
+      if (!calId) continue; // Skip kalau ID kalendernya kosong/belum di-set
+      try {
+        const calendarRes = await calendar.events.list({
+          calendarId: calId,
+          timeMin: awalHari.toISOString(),
+          timeMax: akhirHari.toISOString(),
+          singleEvents: true,
+          orderBy: 'startTime',
+        });
+        allEvents = allEvents.concat(calendarRes.data.items || []);
+      } catch (err) {
+        console.error(`Gagal narik kalender ${calId}:`, err.message);
+      }
+    }
+
+    // Urutin semua event gabungan berdasarkan waktu mulai
+    allEvents.sort((a, b) => {
+      const timeA = a.start.dateTime || a.start.date;
+      const timeB = b.start.dateTime || b.start.date;
+      return new Date(timeA) - new Date(timeB);
     });
 
-    const listEvent = calendarRes.data.items || [];
     let agenda = "Gak ada agenda hari ini, santai cuy!";
 
-    if (listEvent.length > 0) {
-      agenda = listEvent
+    if (allEvents.length > 0) {
+      agenda = allEvents
         .map((event, index) => {
           // Cek apakah event seharian penuh atau ada jamnya
           const waktuMulai = event.start.dateTime
