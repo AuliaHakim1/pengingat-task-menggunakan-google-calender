@@ -1,6 +1,8 @@
 import { google } from 'googleapis';
 
-// Helper untuk kirim pesan Telegram
+// =============================================
+// HELPER: Kirim pesan Telegram
+// =============================================
 async function sendTelegramMsg(chatId, text, replyMarkup = null) {
   const body = { chat_id: chatId, text };
   if (replyMarkup) body.reply_markup = replyMarkup;
@@ -11,8 +13,143 @@ async function sendTelegramMsg(chatId, text, replyMarkup = null) {
   });
 }
 
+// =============================================
+// HELPER: Setup Google Calendar Client
+// =============================================
+function getCalendarClient() {
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+  oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+  return google.calendar({ version: 'v3', auth: oauth2Client });
+}
+
+// =============================================
+// HELPER: Ambil tanggal WIB saat ini
+// =============================================
+function getTodayWIB() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+}
+
+// =============================================
+// HELPER: Parse pesan dengan OpenRouter AI
+// =============================================
+async function parseWithAI(text, today) {
+  const systemPrompt = `Kamu adalah asisten parser perintah untuk bot Telegram kalender.
+Tanggal hari ini (WIB): ${today}
+Ekstrak intent dan data dari pesan bahasa Indonesia berikut.
+Kembalikan HANYA JSON valid tanpa markdown, tanpa penjelasan, tanpa teks lain.
+
+Intent yang tersedia:
+- cek_agenda_hari_ini
+- cek_agenda_besok
+- tambah_acara (butuh: judul, tanggal YYYY-MM-DD, opsional: jam HH:MM, deskripsi)
+- hapus_acara (butuh: judul, tanggal YYYY-MM-DD)
+- edit_deskripsi (butuh: judul, tanggal YYYY-MM-DD, deskripsi_baru)
+- cek_cuaca
+- fallback (jika tidak ada intent yang cocok)
+
+Format response JSON:
+{
+  "intent": "nama_intent",
+  "judul": "judul acara jika ada",
+  "tanggal": "YYYY-MM-DD jika ada",
+  "jam": "HH:MM jika ada, null jika tidak disebutkan",
+  "deskripsi": "teks deskripsi jika ada, null jika tidak ada"
+}`;
+
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://github.com/AuliaHakim1/pengingat-task-menggunakan-google-calender',
+        'X-Title': 'Bot Telegram Kalender'
+      },
+      body: JSON.stringify({
+        model: 'google/gemma-3-27b-it:free',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: text }
+        ],
+        temperature: 0.1,
+        max_tokens: 300
+      })
+    });
+
+    const data = await res.json();
+    const rawContent = data.choices?.[0]?.message?.content?.trim();
+    if (!rawContent) return { intent: 'fallback' };
+
+    // Bersihkan kalau ada markdown code block dari AI
+    const cleaned = rawContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    return JSON.parse(cleaned);
+  } catch (err) {
+    console.error('OpenRouter error:', err.message);
+    return { intent: 'fallback' };
+  }
+}
+
+// =============================================
+// HELPER: Format event Google Calendar
+// =============================================
+function formatEvent(event) {
+  let waktuMulai = event.start.date ? 'Seharian Penuh' : '';
+  if (event.start.dateTime) {
+    waktuMulai = new Intl.DateTimeFormat('id-ID', {
+      timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit'
+    }).format(new Date(event.start.dateTime)) + ' WIB';
+  }
+  const judul = event.summary || 'Tanpa Judul';
+  const lokasiEvent = event.location ? `\nLokasi: ${event.location}` : '';
+  let deskripsi = '';
+  if (event.description) {
+    const descBersih = event.description.replace(/<br\s*[\/]?>/gi, '\n').replace(/<[^>]+>/g, '');
+    deskripsi = `\nDeskripsi:\n${descBersih}`;
+  }
+  return `Acara: ${judul}\nWaktu: ${waktuMulai}${lokasiEvent}${deskripsi}`;
+}
+
+// =============================================
+// HELPER: Ambil events dari semua kalender
+// =============================================
+async function fetchEvents(calendar, dateStr) {
+  const awalHari = new Date(`${dateStr}T00:00:00+07:00`);
+  const akhirHari = new Date(`${dateStr}T23:59:59+07:00`);
+  const calendarIds = ['primary', process.env.CALENDAR_SIB_ID];
+  let allEvents = [];
+
+  for (const calId of calendarIds) {
+    if (!calId) continue;
+    try {
+      const calRes = await calendar.events.list({
+        calendarId: calId,
+        timeMin: awalHari.toISOString(),
+        timeMax: akhirHari.toISOString(),
+        singleEvents: true,
+        orderBy: 'startTime',
+      });
+      allEvents = allEvents.concat(calRes.data.items || []);
+    } catch (err) {
+      console.error(`Gagal narik kalender ${calId}:`, err.message);
+    }
+  }
+
+  allEvents.sort((a, b) =>
+    new Date(a.start.dateTime || a.start.date) - new Date(b.start.dateTime || b.start.date)
+  );
+  return allEvents;
+}
+
+// =============================================
+// MAIN HANDLER
+// =============================================
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(200).send('Hanya menerima request POST');
+  if (req.method !== 'POST') return res.status(200).send('Hanya menerima POST');
 
   const message = req.body.message;
   if (!message || (!message.text && !message.location)) {
@@ -21,217 +158,191 @@ export default async function handler(req, res) {
 
   const chatId = message.chat.id;
 
-  // === FITUR 2: LOKASI CUACA (Via Attachment Location) ===
+  // === Tangani kiriman LOKASI (untuk cuaca) ===
   if (message.location) {
     try {
       const { latitude: lat, longitude: lon } = message.location;
       const weatherRes = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=${lat},${lon}`);
       const weatherData = await weatherRes.json();
-      const textTelegram = `📍 Laporan Cuaca\n\nLokasi: ${weatherData.location.name}\n🌤 Kondisi: ${weatherData.current.condition.text}\n🌡 Suhu: ${weatherData.current.temp_c}°C`;
-      await sendTelegramMsg(chatId, textTelegram);
-    } catch (error) {
-      console.error(error);
-      await sendTelegramMsg(chatId, 'Waduh, gagal ngambil data cuaca nih.');
+      await sendTelegramMsg(chatId,
+        `📍 Laporan Cuaca\n\nLokasi: ${weatherData.location.name}\n🌤 Kondisi: ${weatherData.current.condition.text}\n🌡 Suhu: ${weatherData.current.temp_c}°C`
+      );
+    } catch (err) {
+      console.error(err);
+      await sendTelegramMsg(chatId, 'Gagal mengambil data cuaca. Coba lagi ya!');
     }
     return res.status(200).send('OK');
   }
 
   const rawText = message.text || '';
-  const teksMasuk = rawText.toLowerCase();
+  const today = getTodayWIB();
 
-  // Minta Lokasi Cuaca
-  if (teksMasuk.includes('cuaca')) {
-    await sendTelegramMsg(chatId, 'Silakan kirim lokasi Anda untuk mendapatkan informasi cuaca terkini di daerah Anda.', {
-      keyboard: [[{ text: '📍 Kirim Lokasi Saat Ini', request_location: true }]],
-      resize_keyboard: true,
-      one_time_keyboard: true
-    });
+  // === Parse pesan dengan AI ===
+  let parsed;
+  try {
+    parsed = await parseWithAI(rawText, today);
+  } catch (err) {
+    parsed = { intent: 'fallback' };
+  }
+
+  console.log('AI parsed:', JSON.stringify(parsed));
+
+  // =============================================
+  // ROUTING BERDASARKAN INTENT
+  // =============================================
+
+  // --- CEK AGENDA HARI INI ---
+  if (parsed.intent === 'cek_agenda_hari_ini') {
+    try {
+      const calendar = getCalendarClient();
+      const events = await fetchEvents(calendar, today);
+      const agenda = events.length > 0
+        ? events.map(formatEvent).join('\n\n------------------------\n\n')
+        : 'Tidak ada agenda hari ini, santai cuy! 🎉';
+
+      const weatherRes = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=Bekasi`);
+      const weatherData = await weatherRes.json();
+      await sendTelegramMsg(chatId,
+        `👋 Laporan Harian\n\n📍 Lokasi: ${weatherData.location.name}\n🌤 Kondisi: ${weatherData.current.condition.text}\n🌡 Suhu: ${weatherData.current.temp_c}°C\n\n📅 Agenda Hari Ini:\n${agenda}`
+      );
+    } catch (err) {
+      console.error(err);
+      await sendTelegramMsg(chatId, `❌ Gagal cek agenda.\nError: ${err.message}`);
+    }
     return res.status(200).send('OK');
   }
 
-  // === FITUR 3: TAMBAH JADWAL ===
-  const tambahMatch = rawText.match(/^tambah acara\s*:\s*([^\n]+)(?:\n([\s\S]*))?/i);
-  if (tambahMatch) {
-    const firstLine = tambahMatch[1];
-    const deskripsi = tambahMatch[2] ? tambahMatch[2].trim() : '';
-    const dateMatch = firstLine.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
-    
-    if (!dateMatch) {
-      await sendTelegramMsg(chatId, '❌ Format salah. Harap cantumkan tanggal dengan format DD-MM-YYYY.\nContoh:\ntambah acara : Rapat Klien 19-05-2026\nIni deskripsinya...');
+  // --- CEK AGENDA BESOK ---
+  if (parsed.intent === 'cek_agenda_besok') {
+    try {
+      const calendar = getCalendarClient();
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrowStr = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit'
+      }).format(tomorrow);
+
+      const events = await fetchEvents(calendar, tomorrowStr);
+      const agenda = events.length > 0
+        ? events.map(formatEvent).join('\n\n------------------------\n\n')
+        : 'Tidak ada agenda besok, kosong nih! 🎉';
+
+      await sendTelegramMsg(chatId, `📅 Agenda Besok:\n\n${agenda}`);
+    } catch (err) {
+      console.error(err);
+      await sendTelegramMsg(chatId, `❌ Gagal cek agenda besok.\nError: ${err.message}`);
+    }
+    return res.status(200).send('OK');
+  }
+
+  // --- TAMBAH ACARA ---
+  if (parsed.intent === 'tambah_acara') {
+    const { judul, tanggal, jam, deskripsi } = parsed;
+    if (!judul || !tanggal) {
+      await sendTelegramMsg(chatId, '⚠️ Saya belum paham lengkap. Bisa sebutkan nama acara dan tanggalnya?');
       return res.status(200).send('OK');
     }
-
-    const day = dateMatch[1].padStart(2, '0');
-    const month = dateMatch[2].padStart(2, '0');
-    const year = dateMatch[3];
-    const dateStr = `${year}-${month}-${day}`;
-    
-    const startDateObj = new Date(`${dateStr}T00:00:00`);
-    startDateObj.setDate(startDateObj.getDate() + 1);
-    const nextDayStr = startDateObj.toISOString().split('T')[0];
-    
-    let title = firstLine.replace(dateMatch[0], '').replace(/\||-|:/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!title) title = 'Acara Baru';
-
     try {
-      const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
-      oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-      
-      const reqBody = {
-        summary: title,
-        start: { date: dateStr },
-        end: { date: nextDayStr }
-      };
+      const calendar = getCalendarClient();
+      const nextDay = new Date(`${tanggal}T00:00:00`);
+      nextDay.setDate(nextDay.getDate() + 1);
+      const nextDayStr = nextDay.toISOString().split('T')[0];
+
+      const reqBody = { summary: judul };
+      if (jam) {
+        reqBody.start = { dateTime: `${tanggal}T${jam}:00+07:00`, timeZone: 'Asia/Jakarta' };
+        reqBody.end = { dateTime: `${tanggal}T${jam}:00+07:00`, timeZone: 'Asia/Jakarta' };
+        // Default durasi 1 jam
+        const endTime = new Date(`${tanggal}T${jam}:00+07:00`);
+        endTime.setHours(endTime.getHours() + 1);
+        reqBody.end.dateTime = endTime.toISOString();
+      } else {
+        reqBody.start = { date: tanggal };
+        reqBody.end = { date: nextDayStr };
+      }
       if (deskripsi) reqBody.description = deskripsi;
 
-      await calendar.events.insert({
-        calendarId: 'primary',
-        requestBody: reqBody
-      });
-      await sendTelegramMsg(chatId, `✅ Berhasil menambahkan jadwal!\n\nAcara: ${title}\nTanggal: ${day}-${month}-${year}\nDeskripsi: ${deskripsi ? 'Ada' : 'Tidak ada'}`);
+      await calendar.events.insert({ calendarId: 'primary', requestBody: reqBody });
+
+      const [y, m, d] = tanggal.split('-');
+      await sendTelegramMsg(chatId,
+        `✅ Berhasil menambahkan jadwal!\n\nAcara: ${judul}\nTanggal: ${d}-${m}-${y}${jam ? `\nJam: ${jam} WIB` : ''}\nDeskripsi: ${deskripsi ? 'Ada ✓' : 'Tidak ada'}`
+      );
     } catch (err) {
       console.error(err);
-      await sendTelegramMsg(chatId, `❌ Gagal menambahkan jadwal ke Google Calendar.\nError: ${err.message}`);
+      await sendTelegramMsg(chatId, `❌ Gagal menambahkan jadwal.\nError: ${err.message}`);
     }
     return res.status(200).send('OK');
   }
 
-  // === FITUR 5: EDIT DESKRIPSI ACARA ===
-  const editMatch = rawText.match(/^edit deskripsi\s*:\s*([^\n]+)\n([\s\S]*)/i);
-  if (editMatch) {
-    const firstLine = editMatch[1];
-    const deskripsiBaru = editMatch[2].trim();
-    const dateMatch = firstLine.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
-
-    if (!dateMatch) {
-      await sendTelegramMsg(chatId, '❌ Format salah. Harap cantumkan tanggal dengan format DD-MM-YYYY.\nContoh:\nedit deskripsi : Rapat Klien 19-05-2026\nIni deskripsi barunya...');
+  // --- EDIT DESKRIPSI ---
+  if (parsed.intent === 'edit_deskripsi') {
+    const { judul, tanggal, deskripsi } = parsed;
+    if (!judul || !tanggal || !deskripsi) {
+      await sendTelegramMsg(chatId, '⚠️ Saya perlu tahu: nama acara, tanggalnya, dan deskripsi barunya. Bisa ulangi lebih lengkap?');
       return res.status(200).send('OK');
     }
-
-    const day = dateMatch[1].padStart(2, '0');
-    const month = dateMatch[2].padStart(2, '0');
-    const year = dateMatch[3];
-    const dateStr = `${year}-${month}-${day}`;
-    let titleToFind = firstLine.replace(dateMatch[0], '').replace(/\||-|:/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
-
     try {
-      const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
-      oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-
-      // Ambil semua acara pada tanggal tersebut
-      const awalHari = new Date(`${dateStr}T00:00:00+07:00`).toISOString();
-      const akhirHari = new Date(`${dateStr}T23:59:59+07:00`).toISOString();
-      
-      const calendarRes = await calendar.events.list({
-        calendarId: 'primary',
-        timeMin: awalHari,
-        timeMax: akhirHari,
-        singleEvents: true
-      });
-
-      const events = calendarRes.data.items || [];
-      const targetEvent = events.find(ev => ev.summary && ev.summary.toLowerCase().includes(titleToFind));
-
-      if (!targetEvent) {
-        await sendTelegramMsg(chatId, `❌ Acara dengan kata kunci "${titleToFind}" pada tanggal ${dateStr} tidak ditemukan.`);
+      const calendar = getCalendarClient();
+      const events = await fetchEvents(calendar, tanggal);
+      const target = events.find(ev => ev.summary?.toLowerCase().includes(judul.toLowerCase()));
+      if (!target) {
+        await sendTelegramMsg(chatId, `❌ Acara "${judul}" pada tanggal ${tanggal} tidak ditemukan.`);
         return res.status(200).send('OK');
       }
-
       await calendar.events.patch({
         calendarId: 'primary',
-        eventId: targetEvent.id,
-        requestBody: {
-          description: deskripsiBaru
-        }
+        eventId: target.id,
+        requestBody: { description: deskripsi }
       });
-
-      await sendTelegramMsg(chatId, `✅ Berhasil memperbarui deskripsi!\n\nAcara: ${targetEvent.summary}\nTanggal: ${day}-${month}-${year}`);
+      await sendTelegramMsg(chatId, `✅ Deskripsi acara "${target.summary}" berhasil diperbarui!`);
     } catch (err) {
       console.error(err);
-      await sendTelegramMsg(chatId, `❌ Gagal memperbarui deskripsi.\nError: ${err.message}`);
+      await sendTelegramMsg(chatId, `❌ Gagal edit deskripsi.\nError: ${err.message}`);
     }
     return res.status(200).send('OK');
   }
 
-  // === FITUR 4: CEK AGENDA (HARI INI / BESOK) ===
-  const isCekJadwal = teksMasuk.includes('halo') || teksMasuk.includes('kegiatan') || teksMasuk.includes('hari ini') || teksMasuk.includes('agenda') || teksMasuk.includes('besok');
-  
-  if (isCekJadwal) {
+  // --- HAPUS ACARA ---
+  if (parsed.intent === 'hapus_acara') {
+    const { judul, tanggal } = parsed;
+    if (!judul || !tanggal) {
+      await sendTelegramMsg(chatId, '⚠️ Saya perlu tahu: nama acara dan tanggalnya untuk menghapus. Bisa sebutkan?');
+      return res.status(200).send('OK');
+    }
     try {
-      const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
-      oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-
-      const isBesok = teksMasuk.includes('besok');
-      const targetDate = new Date();
-      if (isBesok) targetDate.setDate(targetDate.getDate() + 1); // Tambah 1 hari jika besok
-
-      const tglWIB = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' }).format(targetDate);
-      const awalHari = new Date(`${tglWIB}T00:00:00+07:00`);
-      const akhirHari = new Date(`${tglWIB}T23:59:59+07:00`);
-
-      const calendarIds = ['primary', process.env.CALENDAR_SIB_ID];
-      let allEvents = [];
-
-      for (const calId of calendarIds) {
-        if (!calId) continue;
-        try {
-          const calendarRes = await calendar.events.list({
-            calendarId: calId, timeMin: awalHari.toISOString(), timeMax: akhirHari.toISOString(),
-            singleEvents: true, orderBy: 'startTime',
-          });
-          allEvents = allEvents.concat(calendarRes.data.items || []);
-        } catch (err) {
-          console.error(err);
-        }
+      const calendar = getCalendarClient();
+      const events = await fetchEvents(calendar, tanggal);
+      const target = events.find(ev => ev.summary?.toLowerCase().includes(judul.toLowerCase()));
+      if (!target) {
+        await sendTelegramMsg(chatId, `❌ Acara "${judul}" pada tanggal ${tanggal} tidak ditemukan.`);
+        return res.status(200).send('OK');
       }
-
-      allEvents.sort((a, b) => new Date(a.start.dateTime || a.start.date) - new Date(b.start.dateTime || b.start.date));
-
-      let agenda = `Tidak ada agenda untuk ${isBesok ? 'besok' : 'hari ini'}, santai cuy!`;
-      if (allEvents.length > 0) {
-        agenda = allEvents.map((event) => {
-          let waktuMulai = event.start.date || 'Seharian Penuh';
-          if (event.start.dateTime) {
-            waktuMulai = new Intl.DateTimeFormat('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' }).format(new Date(event.start.dateTime)) + ' WIB';
-          }
-          const judul = event.summary || 'Tanpa Judul';
-          const lokasiEvent = event.location ? `\nLokasi: ${event.location}` : '';
-          
-          let deskripsi = '';
-          if (event.description) {
-            let descBersih = event.description.replace(/<br\s*[\/]?>/gi, '\n').replace(/<[^>]+>/g, '');
-            deskripsi = `\nDeskripsi:\n${descBersih}`;
-          }
-          
-          return `Acara: ${judul}\nWaktu: ${waktuMulai}${lokasiEvent}${deskripsi}`;
-        }).join('\n\n------------------------\n\n');
-      }
-
-      const greeting = isBesok ? '📅 Agenda Besok:' : '📅 Agenda Hari Ini:';
-      
-      // Jika cek hari ini secara teks, sertakan cuaca statis sebagai fallback lama
-      if (!isBesok && (teksMasuk.includes('halo') || teksMasuk.includes('hari ini'))) {
-         const weatherRes = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=Bekasi`);
-         const weatherData = await weatherRes.json();
-         const textTelegram = `👋 Laporan Harian\n\n📍 Lokasi: ${weatherData.location.name}\n🌤 Kondisi: ${weatherData.current.condition.text}\n🌡 Suhu: ${weatherData.current.temp_c}°C\n\n${greeting}\n${agenda}`;
-         await sendTelegramMsg(chatId, textTelegram);
-      } else {
-         await sendTelegramMsg(chatId, `${greeting}\n\n${agenda}`);
-      }
-      
-    } catch (error) {
-      console.error(error);
-      await sendTelegramMsg(chatId, `Waduh, sistemnya lagi error nih ngecek jadwal.\nError: ${error.message}`);
+      await calendar.events.delete({ calendarId: 'primary', eventId: target.id });
+      await sendTelegramMsg(chatId, `🗑️ Acara "${target.summary}" berhasil dihapus!`);
+    } catch (err) {
+      console.error(err);
+      await sendTelegramMsg(chatId, `❌ Gagal menghapus acara.\nError: ${err.message}`);
     }
     return res.status(200).send('OK');
   }
 
-  // Default fallback
-  if (teksMasuk) {
-    await sendTelegramMsg(chatId, 'Ketik "agenda" untuk jadwal hari ini, "besok" untuk jadwal besok, atau "cuaca" untuk cek cuaca.');
+  // --- CEK CUACA ---
+  if (parsed.intent === 'cek_cuaca') {
+    await sendTelegramMsg(chatId,
+      'Silakan kirim lokasi Anda untuk mendapatkan informasi cuaca terkini! 🌤',
+      {
+        keyboard: [[{ text: '📍 Kirim Lokasi Saat Ini', request_location: true }]],
+        resize_keyboard: true,
+        one_time_keyboard: true
+      }
+    );
+    return res.status(200).send('OK');
   }
+
+  // --- FALLBACK ---
+  await sendTelegramMsg(chatId,
+    `Halo! Saya asisten bot kalender Anda. 😊\n\nSaya bisa:\n📅 Cek jadwal hari ini / besok\n➕ Tambah acara baru\n🗑️ Hapus acara\n✏️ Edit deskripsi acara\n🌤 Cek cuaca berdasarkan lokasi\n\nCukup bicara natural, contoh:\n"besok ada rapat jam 2 siang"\n"jadwal hari ini apa aja?"\n"hapus acara meeting tanggal 20 Mei"`
+  );
   return res.status(200).send('OK');
 }
