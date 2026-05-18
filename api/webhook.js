@@ -22,20 +22,24 @@ export default async function handler(req, res) {
   // 1. Cek jika pesan berupa Callback Query (dari tombol Inline)
   if (req.body.callback_query) {
     const callbackQuery = req.body.callback_query;
-    chatId = callbackQuery.message.chat.id;
+    chatId = callbackQuery.message ? callbackQuery.message.chat.id : callbackQuery.from.id;
     const data = callbackQuery.data;
 
     // Balas callback supaya loading icon di tombol Telegram hilang
-    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callback_query_id: callbackQuery.id }),
-    });
+    try {
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQuery.id }),
+      });
+    } catch (e) {
+      console.error("Gagal answerCallbackQuery:", e);
+    }
 
     if (data === 'btn_agenda_hari_ini') teksMasuk = 'hari ini';
     if (data === 'btn_agenda_besok') teksMasuk = 'besok';
     if (data === 'btn_cuaca') teksMasuk = 'cuaca';
-  } 
+  }
   // 2. Cek jika pesan teks biasa atau lokasi
   else if (req.body.message) {
     const message = req.body.message;
@@ -191,7 +195,7 @@ export default async function handler(req, res) {
       
     } catch (error) {
       console.error(error);
-      await sendTelegramMsg(chatId, 'Waduh, sistemnya lagi error nih ngecek jadwal.');
+      await sendTelegramMsg(chatId, `Waduh, sistemnya lagi error nih ngecek jadwal.\nError: ${error.message}`);
     }
     return res.status(200).send('OK');
   }
