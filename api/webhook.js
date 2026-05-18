@@ -1,97 +1,151 @@
 import { google } from 'googleapis';
 
+// Helper untuk kirim pesan Telegram
+async function sendTelegramMsg(chatId, text, replyMarkup = null) {
+  const body = { chat_id: chatId, text };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 export default async function handler(req, res) {
-  // Wajib pakai metode POST karena Telegram ngirim datanya lewat POST
-  if (req.method !== 'POST') {
-    return res.status(200).send('Hanya menerima request POST dari Telegram');
-  }
+  if (req.method !== 'POST') return res.status(200).send('Hanya menerima request POST');
 
-  // Ambil data pesan dari Telegram
-  const message = req.body.message;
-  
-  // Kalau yang masuk bukan pesan teks atau lokasi, abaikan aja
-  if (!message || (!message.text && !message.location)) {
-    return res.status(200).send('OK');
-  }
+  let chatId = null;
+  let teksMasuk = '';
+  let isLocation = false;
+  let locationData = null;
 
-  const chatId = message.chat.id;
+  // 1. Cek jika pesan berupa Callback Query (dari tombol Inline)
+  if (req.body.callback_query) {
+    const callbackQuery = req.body.callback_query;
+    chatId = callbackQuery.message.chat.id;
+    const data = callbackQuery.data;
 
-  // === ALUR 1: Jika User Mengirim Lokasi ===
-  if (message.location) {
-    try {
-      const lat = message.location.latitude;
-      const lon = message.location.longitude;
-      
-      const weatherRes = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=${lat},${lon}`);
-      const weatherData = await weatherRes.json();
-      const cuaca = weatherData.current.condition.text;
-      const suhu = weatherData.current.temp_c;
-      const lokasi = weatherData.location.name;
-
-      const textTelegram = `📍 Laporan Cuaca\n\nLokasi: ${lokasi}\n🌤 Kondisi: ${cuaca}\n🌡 Suhu: ${suhu}°C`;
-
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: textTelegram }),
-      });
-    } catch (error) {
-      console.error("Gagal ambil cuaca:", error);
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: 'Waduh, gagal ngambil data cuaca nih.' }),
-      });
-    }
-    return res.status(200).send('OK');
-  }
-
-  // === PASTIKAN ADA TEKS SEBELUM LANJUT ===
-  if (!message.text) return res.status(200).send('OK');
-  
-  const teksMasuk = message.text.toLowerCase();
-
-  // === ALUR 2: Jika User Minta Cuaca ===
-  if (teksMasuk.includes('cuaca')) {
-    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    // Balas callback supaya loading icon di tombol Telegram hilang
+    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        chat_id: chatId, 
-        text: 'Silakan kirim lokasi Anda untuk mendapatkan informasi cuaca terkini di daerah Anda.',
-        reply_markup: {
-          keyboard: [
-            [{ text: '📍 Kirim Lokasi Saat Ini', request_location: true }]
-          ],
-          resize_keyboard: true,
-          one_time_keyboard: true
-        }
-      }),
+      body: JSON.stringify({ callback_query_id: callbackQuery.id }),
+    });
+
+    if (data === 'btn_agenda_hari_ini') teksMasuk = 'hari ini';
+    if (data === 'btn_agenda_besok') teksMasuk = 'besok';
+    if (data === 'btn_cuaca') teksMasuk = 'cuaca';
+  } 
+  // 2. Cek jika pesan teks biasa atau lokasi
+  else if (req.body.message) {
+    const message = req.body.message;
+    chatId = message.chat.id;
+    
+    if (message.location) {
+      isLocation = true;
+      locationData = message.location;
+    } else if (message.text) {
+      teksMasuk = message.text.toLowerCase();
+    }
+  }
+
+  // Jika tidak ada chatId, abaikan
+  if (!chatId) return res.status(200).send('OK');
+
+  // === FITUR 1: INTERAKTIF START ===
+  if (teksMasuk === '/start' || teksMasuk === 'start') {
+    await sendTelegramMsg(chatId, 'Halo! Saya asisten bot Anda. Silakan pilih menu di bawah ini:', {
+      inline_keyboard: [
+        [{ text: '🗓 Cek Agenda Hari Ini', callback_data: 'btn_agenda_hari_ini' }],
+        [{ text: '📆 Cek Agenda Besok', callback_data: 'btn_agenda_besok' }],
+        [{ text: '🌤 Cek Cuaca Saat Ini', callback_data: 'btn_cuaca' }]
+      ]
     });
     return res.status(200).send('OK');
   }
 
-  // === ALUR 3: Laporan Penuh (Jadwal + Cuaca Statis) ===
-  // Cek apakah pesan mengandung kata kunci nanyain jadwal
-  if (teksMasuk.includes('halo') || teksMasuk.includes('kegiatan') || teksMasuk.includes('hari ini') || teksMasuk.includes('agenda')) {
-    
+  // === FITUR 2: LOKASI CUACA ===
+  if (isLocation && locationData) {
     try {
-      // === 1. SETUP AUTH GOOGLE CALENDAR ===
-      const oauth2Client = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET
-      );
+      const { latitude: lat, longitude: lon } = locationData;
+      const weatherRes = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=${lat},${lon}`);
+      const weatherData = await weatherRes.json();
+      const textTelegram = `📍 Laporan Cuaca\n\nLokasi: ${weatherData.location.name}\n🌤 Kondisi: ${weatherData.current.condition.text}\n🌡 Suhu: ${weatherData.current.temp_c}°C`;
+      await sendTelegramMsg(chatId, textTelegram);
+    } catch (error) {
+      console.error(error);
+      await sendTelegramMsg(chatId, 'Waduh, gagal ngambil data cuaca nih.');
+    }
+    return res.status(200).send('OK');
+  }
+
+  // Minta Lokasi Cuaca
+  if (teksMasuk.includes('cuaca')) {
+    await sendTelegramMsg(chatId, 'Silakan kirim lokasi Anda untuk mendapatkan informasi cuaca terkini di daerah Anda.', {
+      keyboard: [[{ text: '📍 Kirim Lokasi Saat Ini', request_location: true }]],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    });
+    return res.status(200).send('OK');
+  }
+
+  // === FITUR 3: TAMBAH JADWAL ===
+  const tambahMatch = teksMasuk.match(/^tambah acara\s*:\s*(.*)/i);
+  if (tambahMatch) {
+    const content = tambahMatch[1];
+    const dateMatch = content.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
+    
+    if (!dateMatch) {
+      await sendTelegramMsg(chatId, '❌ Format salah. Harap cantumkan tanggal dengan format DD-MM-YYYY.\nContoh: tambah acara : Rapat Klien 19-05-2026');
+      return res.status(200).send('OK');
+    }
+
+    const day = dateMatch[1].padStart(2, '0');
+    const month = dateMatch[2].padStart(2, '0');
+    const year = dateMatch[3];
+    const dateStr = `${year}-${month}-${day}`;
+    
+    let title = content.replace(dateMatch[0], '').replace(/\||-|:/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!title) title = 'Acara Baru';
+
+    try {
+      const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
+      oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+      
+      await calendar.events.insert({
+        calendarId: 'primary',
+        requestBody: {
+          summary: title,
+          start: { date: dateStr, timeZone: 'Asia/Jakarta' },
+          end: { date: dateStr, timeZone: 'Asia/Jakarta' }
+        }
+      });
+      await sendTelegramMsg(chatId, `✅ Berhasil menambahkan jadwal!\n\nAcara: ${title}\nTanggal: ${day}-${month}-${year}`);
+    } catch (err) {
+      console.error(err);
+      await sendTelegramMsg(chatId, '❌ Gagal menambahkan jadwal ke Google Calendar.');
+    }
+    return res.status(200).send('OK');
+  }
+
+  // === FITUR 4: CEK AGENDA (HARI INI / BESOK) ===
+  const isCekJadwal = teksMasuk.includes('halo') || teksMasuk.includes('kegiatan') || teksMasuk.includes('hari ini') || teksMasuk.includes('agenda') || teksMasuk.includes('besok');
+  
+  if (isCekJadwal) {
+    try {
+      const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
       oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
       const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
-      // === 2. SET TIMEFRAME WIB ===
-      const tglWIB = new Intl.DateTimeFormat('en-CA', { 
-        timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' 
-      }).format(new Date());
+      const isBesok = teksMasuk.includes('besok');
+      const targetDate = new Date();
+      if (isBesok) targetDate.setDate(targetDate.getDate() + 1); // Tambah 1 hari jika besok
+
+      const tglWIB = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' }).format(targetDate);
       const awalHari = new Date(`${tglWIB}T00:00:00+07:00`);
       const akhirHari = new Date(`${tglWIB}T23:59:59+07:00`);
 
-      // === 3. FETCH AGENDA ===
       const calendarIds = ['primary', process.env.CALENDAR_SIB_ID];
       let allEvents = [];
 
@@ -104,63 +158,47 @@ export default async function handler(req, res) {
           });
           allEvents = allEvents.concat(calendarRes.data.items || []);
         } catch (err) {
-          console.error(`Gagal narik kalender:`, err.message);
+          console.error(err);
         }
       }
 
       allEvents.sort((a, b) => new Date(a.start.dateTime || a.start.date) - new Date(b.start.dateTime || b.start.date));
 
-      let agenda = "Gak ada agenda hari ini, santai cuy!";
+      let agenda = `Tidak ada agenda untuk ${isBesok ? 'besok' : 'hari ini'}, santai cuy!`;
       if (allEvents.length > 0) {
         agenda = allEvents.map((event) => {
           let waktuMulai = event.start.date || 'Seharian Penuh';
-          if (event.start.dateTime) waktuMulai = event.start.dateTime;
+          if (event.start.dateTime) {
+            waktuMulai = new Intl.DateTimeFormat('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' }).format(new Date(event.start.dateTime)) + ' WIB';
+          }
           const judul = event.summary || 'Tanpa Judul';
           const lokasiEvent = event.location ? `\nLokasi: ${event.location}` : '';
-          
-          let deskripsi = '';
-          if (event.description) {
-            let descBersih = event.description.replace(/<br\s*[\/]?>/gi, '\n').replace(/<[^>]+>/g, '');
-            deskripsi = `\n\nDeskripsi:\n${descBersih}`;
-          }
-          return `Acara: ${judul}\nWaktu: ${waktuMulai}${lokasiEvent}${deskripsi}`;
+          return `Acara: ${judul}\nWaktu: ${waktuMulai}${lokasiEvent}`;
         }).join('\n\n------------------------\n\n');
       }
 
-      // === 4. FETCH CUACA ===
-      const weatherRes = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=Bekasi`);
-      const weatherData = await weatherRes.json();
-      const cuaca = weatherData.current.condition.text;
-      const suhu = weatherData.current.temp_c;
-      const lokasi = weatherData.location.name;
-
-      // === 5. KIRIM BALIK KE TELEGRAM ===
-      const textTelegram = `👋 Laporan Harian (Sesuai Permintaan)\n\n📍 Lokasi: ${lokasi}\n🌤 Kondisi: ${cuaca}\n🌡 Suhu: ${suhu}°C\n\n📅 Agenda Berikutnya:\n${agenda}`;
-
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: textTelegram }),
-      });
-
+      const greeting = isBesok ? '📅 Agenda Besok:' : '📅 Agenda Hari Ini:';
+      
+      // Jika cek hari ini secara teks (bukan tombol), sertakan cuaca statis sebagai fallback lama
+      if (!isBesok && !req.body.callback_query && (teksMasuk.includes('halo') || teksMasuk.includes('hari ini'))) {
+         const weatherRes = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=Bekasi`);
+         const weatherData = await weatherRes.json();
+         const textTelegram = `👋 Laporan Harian\n\n📍 Lokasi: ${weatherData.location.name}\n🌤 Kondisi: ${weatherData.current.condition.text}\n🌡 Suhu: ${weatherData.current.temp_c}°C\n\n${greeting}\n${agenda}`;
+         await sendTelegramMsg(chatId, textTelegram);
+      } else {
+         await sendTelegramMsg(chatId, `${greeting}\n\n${agenda}`);
+      }
+      
     } catch (error) {
       console.error(error);
-      // Kirim pesan error ke user kalau gagal
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: 'Waduh, sistemnya lagi error nih ngecek jadwal.' }),
-      });
+      await sendTelegramMsg(chatId, 'Waduh, sistemnya lagi error nih ngecek jadwal.');
     }
-  } else {
-    // Balesan kalau command gak dikenali
-    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: 'Gw cuma bot pengingat jadwal. Coba ketik "halo", "agenda", atau "cuaca".' }),
-    });
+    return res.status(200).send('OK');
   }
 
-  // Wajib kirim 200 OK di akhir biar Telegram tau pesan udah diproses
+  // Default fallback
+  if (teksMasuk) {
+    await sendTelegramMsg(chatId, 'Ketik /start untuk melihat menu, atau coba ketik:\ntambah acara : Rapat 19-05-2026');
+  }
   return res.status(200).send('OK');
 }
