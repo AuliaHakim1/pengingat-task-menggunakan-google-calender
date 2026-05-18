@@ -112,6 +112,9 @@ function parseWithKeyword(text, today) {
   if (t.includes('besok')) return { intent: 'cek_agenda_besok' };
   if (t.includes('hari ini') || t.includes('agenda') || t.includes('jadwal') || t.includes('halo') || t.includes('kegiatan')) return { intent: 'cek_agenda_hari_ini' };
   if (t.includes('cuaca')) return { intent: 'cek_cuaca' };
+  if (t.includes('edit deskripsi') || t.includes('ubah deskripsi') || t.includes('tambah deskripsi')) return { intent: 'edit_deskripsi' };
+  if (t.includes('hapus acara') || t.includes('batalkan acara') || t.includes('hapus jadwal')) return { intent: 'hapus_acara' };
+  if (t.includes('tambah acara') || t.includes('buat jadwal') || t.includes('tambah jadwal')) return { intent: 'tambah_acara' };
   return { intent: 'fallback' };
 }
 
@@ -315,18 +318,42 @@ export default async function handler(req, res) {
   // --- EDIT DESKRIPSI ---
   if (parsed.intent === 'edit_deskripsi') {
     const { judul, tanggal, deskripsi } = parsed;
-    if (!judul || !tanggal || !deskripsi) {
-      await sendTelegramMsg(chatId, '⚠️ Saya perlu tahu: nama acara, tanggalnya, dan deskripsi barunya. Bisa ulangi lebih lengkap?');
+
+    if (!deskripsi) {
+      await sendTelegramMsg(chatId, '⚠️ Bisa sebutkan deskripsi barunya?\n\nContoh:\n"edit deskripsi meeting klien\ndeskripsi barunya di sini..."');
       return res.status(200).send('OK');
     }
+
     try {
       const calendar = getCalendarClient();
-      const events = await fetchEvents(calendar, tanggal);
-      const target = events.find(ev => ev.summary?.toLowerCase().includes(judul.toLowerCase()));
+      let target = null;
+
+      if (tanggal) {
+        // Jika tanggal disebutkan, cari di tanggal itu saja
+        const events = await fetchEvents(calendar, tanggal);
+        target = events.find(ev => ev.summary?.toLowerCase().includes((judul || '').toLowerCase()));
+      } else if (judul) {
+        // Tanggal tidak disebutkan, cari di hari ini + 7 hari ke depan
+        for (let i = 0; i <= 7; i++) {
+          const d = new Date();
+          d.setDate(d.getDate() + i);
+          const dateStr = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit'
+          }).format(d);
+          const events = await fetchEvents(calendar, dateStr);
+          const found = events.find(ev => ev.summary?.toLowerCase().includes(judul.toLowerCase()));
+          if (found) { target = found; break; }
+        }
+      }
+
       if (!target) {
-        await sendTelegramMsg(chatId, `❌ Acara "${judul}" pada tanggal ${tanggal} tidak ditemukan.`);
+        const hint = judul ? `"${judul}"` : 'yang dimaksud';
+        await sendTelegramMsg(chatId,
+          `❌ Acara ${hint} tidak ditemukan dalam 7 hari ke depan.\n\nCoba sebutkan tanggalnya juga, contoh:\n"edit deskripsi presentasi UJK 19-05-2026\ndeskripsi barunya..."`
+        );
         return res.status(200).send('OK');
       }
+
       await calendar.events.patch({
         calendarId: 'primary',
         eventId: target.id,
@@ -339,6 +366,7 @@ export default async function handler(req, res) {
     }
     return res.status(200).send('OK');
   }
+
 
   // --- HAPUS ACARA ---
   if (parsed.intent === 'hapus_acara') {
