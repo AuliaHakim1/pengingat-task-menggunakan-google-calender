@@ -23,7 +23,7 @@ export default async function handler(req, res) {
     // Mengambil batas awal dan akhir hari ini (WIB / waktu lokal server)
     const sekarang = new Date();
     const awalHari = new Date(sekarang.getFullYear(), sekarang.getMonth(), sekarang.getDate(), 0, 0, 0);
-    const akhirHari = new Date(sekarang.getFullYear(), existen = sekarang.getMonth(), sekarang.getDate(), 23, 59, 59);
+    const akhirHari = new Date(sekarang.getFullYear(), sekarang.getMonth(), sekarang.getDate(), 23, 59, 59);
 
     // === 3. FETCH AGENDA DARI GOOGLE CALENDAR ===
     const calendarRes = await calendar.events.list({
