@@ -159,4 +159,5 @@ Bot secara otomatis mengirimkan laporan pagi setiap hari (jam 07:00 WIB) ke `TEL
 
 <div align="center">
   <p>Crafted by <b>Aulia Hakim</b> | Powered by Vercel Serverless & Google Calendar API</p>
-</div>
+</div> 
+
