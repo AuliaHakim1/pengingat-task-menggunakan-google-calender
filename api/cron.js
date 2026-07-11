@@ -104,14 +104,21 @@ export default async function handler(req, res) {
     // === 5. FORMAT & KIRIM TELEGRAM ===
     const textTelegram = `👋 Laporan Harian\n\n📍 Lokasi: ${lokasi}\n🌤 Kondisi: ${cuaca}\n🌡 Suhu: ${suhu}°C\n\n📅 Agenda Berikutnya:\n${agenda}`;
 
-    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: process.env.TELEGRAM_CHAT_ID,
-        text: textTelegram,
-      }),
-    });
+    // Ambil list Chat ID dari .env dan pisahkan berdasarkan koma
+    const chatIds = process.env.ALLOWED_CHAT_IDS ? process.env.ALLOWED_CHAT_IDS.split(',') : [];
+
+    for (const id of chatIds) {
+      if (!id) continue;
+      
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: id.trim(),
+          text: textTelegram,
+        }),
+      });
+    }
 
     return res.status(200).json({ success: true, message: 'Workflow lancar jaya!' });
   } catch (error) {
@@ -119,4 +126,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: error.message });
   }
 }
-// Unified release and commit
