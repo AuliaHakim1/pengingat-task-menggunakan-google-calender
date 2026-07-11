@@ -71,7 +71,7 @@ Format response JSON:
         'X-Title': 'Bot Telegram Kalender'
       },
       body: JSON.stringify({
-        model: 'meta-llama/llama-3-8b-instruct:free', // Pake Llama 3 free, lebih stabil json-nya
+        model: 'nvidia/nemotron-3-ultra-550b-a55b:free', 
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: text }
