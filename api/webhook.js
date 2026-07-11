@@ -71,7 +71,7 @@ Format response JSON:
         'X-Title': 'Bot Telegram Kalender'
       },
       body: JSON.stringify({
-        model: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+        model: 'meta-llama/llama-3-8b-instruct:free', // Pake Llama 3 free, lebih stabil json-nya
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: text }
@@ -95,8 +95,14 @@ Format response JSON:
       return { intent: 'fallback' };
     }
 
+    // FIX 1: Ambil murni JSON aja pakai Regex (mengakali AI yg bandel ngasih teks)
+    const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error(`AI tidak mengembalikan JSON. Response: ${rawContent}`);
+    }
+
     // Bersihkan kalau ada markdown code block dari AI
-    const cleaned = rawContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const cleaned = jsonMatch[0].replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     return JSON.parse(cleaned);
   } catch (err) {
     console.error('OpenRouter fetch error:', err.message);
@@ -109,12 +115,16 @@ Format response JSON:
 // =============================================
 function parseWithKeyword(text, today) {
   const t = text.toLowerCase();
+  
+  // FIX 2: Urutannya dibalik. Cek aksi dulu, baru cek keterangan waktu
+  if (t.includes('tambah acara') || t.includes('buat jadwal') || t.includes('tambah jadwal') || t.includes('buat agenda')) return { intent: 'tambah_acara' };
+  if (t.includes('hapus acara') || t.includes('batalkan acara') || t.includes('hapus jadwal')) return { intent: 'hapus_acara' };
+  if (t.includes('edit deskripsi') || t.includes('ubah deskripsi') || t.includes('tambah deskripsi')) return { intent: 'edit_deskripsi' };
+  if (t.includes('cuaca')) return { intent: 'cek_cuaca' };
+
   if (t.includes('besok')) return { intent: 'cek_agenda_besok' };
   if (t.includes('hari ini') || t.includes('agenda') || t.includes('jadwal') || t.includes('halo') || t.includes('kegiatan')) return { intent: 'cek_agenda_hari_ini' };
-  if (t.includes('cuaca')) return { intent: 'cek_cuaca' };
-  if (t.includes('edit deskripsi') || t.includes('ubah deskripsi') || t.includes('tambah deskripsi')) return { intent: 'edit_deskripsi' };
-  if (t.includes('hapus acara') || t.includes('batalkan acara') || t.includes('hapus jadwal')) return { intent: 'hapus_acara' };
-  if (t.includes('tambah acara') || t.includes('buat jadwal') || t.includes('tambah jadwal')) return { intent: 'tambah_acara' };
+  
   return { intent: 'fallback' };
 }
 
@@ -317,7 +327,6 @@ export default async function handler(req, res) {
 
   // --- EDIT DESKRIPSI ---
   if (parsed.intent === 'edit_deskripsi') {
-    // Jika AI tidak berhasil mengekstrak data, parse manual dari rawText
     let { judul, tanggal, deskripsi } = parsed;
 
     if (!judul || !deskripsi) {
@@ -325,21 +334,18 @@ export default async function handler(req, res) {
       const firstLine = lines[0];
       const restLines = lines.slice(1).join('\n').trim();
 
-      // Ekstrak deskripsi dari baris ke-2 dst
       if (!deskripsi && restLines) deskripsi = restLines;
 
-      // Ekstrak judul dari baris pertama (hapus kata perintah di depan)
       if (!judul) {
         judul = firstLine
           .replace(/edit deskripsi\s*/i, '')
           .replace(/untuk acara\s*/i, '')
           .replace(/untuk\s*/i, '')
           .replace(/acara\s*/i, '')
-          .replace(/(\d{1,2})-(\d{1,2})-(\d{4})/, '') // hapus tanggal jika ada
+          .replace(/(\d{1,2})-(\d{1,2})-(\d{4})/, '') 
           .trim();
       }
 
-      // Ekstrak tanggal dari baris pertama jika belum ada
       if (!tanggal) {
         const dateMatch = firstLine.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
         if (dateMatch) {
@@ -399,8 +405,6 @@ export default async function handler(req, res) {
     return res.status(200).send('OK');
   }
 
-
-
   // --- HAPUS ACARA ---
   if (parsed.intent === 'hapus_acara') {
     const { judul, tanggal } = parsed;
@@ -444,4 +448,3 @@ export default async function handler(req, res) {
   );
   return res.status(200).send('OK');
 }
-// Unified release and commit
