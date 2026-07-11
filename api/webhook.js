@@ -95,14 +95,8 @@ Format response JSON:
       return { intent: 'fallback' };
     }
 
-    // FIX 1: Ambil murni JSON aja pakai Regex (mengakali AI yg bandel ngasih teks)
-    const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error(`AI tidak mengembalikan JSON. Response: ${rawContent}`);
-    }
-
     // Bersihkan kalau ada markdown code block dari AI
-    const cleaned = jsonMatch[0].replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const cleaned = rawContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     return JSON.parse(cleaned);
   } catch (err) {
     console.error('OpenRouter fetch error:', err.message);
@@ -115,16 +109,12 @@ Format response JSON:
 // =============================================
 function parseWithKeyword(text, today) {
   const t = text.toLowerCase();
-  
-  // FIX 2: Urutannya dibalik. Cek aksi dulu, baru cek keterangan waktu
-  if (t.includes('tambah acara') || t.includes('buat jadwal') || t.includes('tambah jadwal') || t.includes('buat agenda')) return { intent: 'tambah_acara' };
-  if (t.includes('hapus acara') || t.includes('batalkan acara') || t.includes('hapus jadwal')) return { intent: 'hapus_acara' };
-  if (t.includes('edit deskripsi') || t.includes('ubah deskripsi') || t.includes('tambah deskripsi')) return { intent: 'edit_deskripsi' };
-  if (t.includes('cuaca')) return { intent: 'cek_cuaca' };
-
   if (t.includes('besok')) return { intent: 'cek_agenda_besok' };
   if (t.includes('hari ini') || t.includes('agenda') || t.includes('jadwal') || t.includes('halo') || t.includes('kegiatan')) return { intent: 'cek_agenda_hari_ini' };
-  
+  if (t.includes('cuaca')) return { intent: 'cek_cuaca' };
+  if (t.includes('edit deskripsi') || t.includes('ubah deskripsi') || t.includes('tambah deskripsi')) return { intent: 'edit_deskripsi' };
+  if (t.includes('hapus acara') || t.includes('batalkan acara') || t.includes('hapus jadwal')) return { intent: 'hapus_acara' };
+  if (t.includes('tambah acara') || t.includes('buat jadwal') || t.includes('tambah jadwal')) return { intent: 'tambah_acara' };
   return { intent: 'fallback' };
 }
 
@@ -191,6 +181,16 @@ export default async function handler(req, res) {
   }
 
   const chatId = message.chat.id;
+
+  // --- KODE SATPAM KEAMANAN MULTI-USER ---
+  // Ambil list ID yang diizinkan dari .env
+  const allowedIds = process.env.ALLOWED_CHAT_IDS ? process.env.ALLOWED_CHAT_IDS.split(',').map(id => id.trim()) : [];
+  
+  if (!allowedIds.includes(String(chatId))) {
+    console.log(`Penyusup ditolak: Chat ID ${chatId} tidak terdaftar.`);
+    return res.status(200).send('OK'); // Bot nyuekin pesan dari orang asing
+  }
+  // --- SELESAI ---
 
   // === Tangani kiriman LOKASI (untuk cuaca) ===
   if (message.location) {
@@ -327,6 +327,7 @@ export default async function handler(req, res) {
 
   // --- EDIT DESKRIPSI ---
   if (parsed.intent === 'edit_deskripsi') {
+    // Jika AI tidak berhasil mengekstrak data, parse manual dari rawText
     let { judul, tanggal, deskripsi } = parsed;
 
     if (!judul || !deskripsi) {
@@ -334,18 +335,21 @@ export default async function handler(req, res) {
       const firstLine = lines[0];
       const restLines = lines.slice(1).join('\n').trim();
 
+      // Ekstrak deskripsi dari baris ke-2 dst
       if (!deskripsi && restLines) deskripsi = restLines;
 
+      // Ekstrak judul dari baris pertama (hapus kata perintah di depan)
       if (!judul) {
         judul = firstLine
           .replace(/edit deskripsi\s*/i, '')
           .replace(/untuk acara\s*/i, '')
           .replace(/untuk\s*/i, '')
           .replace(/acara\s*/i, '')
-          .replace(/(\d{1,2})-(\d{1,2})-(\d{4})/, '') 
+          .replace(/(\d{1,2})-(\d{1,2})-(\d{4})/, '') // hapus tanggal jika ada
           .trim();
       }
 
+      // Ekstrak tanggal dari baris pertama jika belum ada
       if (!tanggal) {
         const dateMatch = firstLine.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
         if (dateMatch) {
